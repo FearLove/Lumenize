@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lamp controller for Arcadia LumenIZE</title>
+<style>
+:root{--bg:#eef3ef;--card:#fff;--ink:#1c2b25;--mute:#5d6f67;--line:#cfdad3;--moss:#2f5d50;--sun:#e0a100;--bad:#b3261e;
+ box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1916;--card:#17241f;--ink:#e6efe9;--mute:#97aaa1;--line:#2b3d36;--moss:#6fb59f;--sun:#f2b705;--bad:#ff8a80;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f1916;--card:#17241f;--ink:#e6efe9;--mute:#97aaa1;--line:#2b3d36;--moss:#6fb59f;--sun:#f2b705;--bad:#ff8a80;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 ui-rounded,"Avenir Next",system-ui,sans-serif}
+main{max-width:560px;margin:0 auto;padding:16px}
+h1{font-size:1.35rem;margin:4px 0 2px}h2{font-size:1rem;margin:0 0 10px}
+.sub{color:var(--mute);margin:0 0 14px;font-size:.9rem}
+section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+button{font:inherit;border:1px solid var(--moss);background:transparent;color:var(--moss);border-radius:10px;padding:9px 14px;min-height:44px}
+button.main{background:var(--moss);color:var(--bg)}
+button:disabled{opacity:.4}
+button:focus-visible,input:focus-visible{outline:3px solid var(--sun);outline-offset:2px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+#status{margin:10px 0 0;font-size:.9rem;color:var(--mute)}
+.big{font-size:2.6rem;font-weight:700;line-height:1;color:var(--sun)}
+input[type=range]{width:100%;accent-color:var(--sun);height:32px}
+input[type=time],input[type=text]{font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);min-height:44px}
+.slot{display:flex;gap:8px;align-items:center;margin:6px 0}
+.slot output{width:3.2em;text-align:right;font-variant-numeric:tabular-nums}
+svg{width:100%;height:auto;display:block;margin:4px 0 10px}
+.sw{display:flex;gap:10px;align-items:center;min-height:44px}
+.sw input{width:22px;height:22px;accent-color:var(--moss)}
+details pre{max-height:220px;overflow:auto;font-size:.75rem;background:var(--bg);padding:8px;border-radius:8px;margin:8px 0 0;white-space:pre-wrap}
+.warn{color:var(--bad)}
+</style>
+</head>
+<body>
+<main>
+<h1>Lamp controller</h1>
+<p class="sub">For Arcadia LumenIZE Jungle Dawn LED bars. Open in Bluefy on iPhone.</p>
+
+<section>
+ <div class="row"><button class="main" id="conn">Connect to lamp</button><button id="disc" disabled>Disconnect</button></div>
+ <p id="status">Not connected.</p>
+ <div class="row" style="margin-top:8px"><label for="pw">Lamp password</label><input id="pw" type="text" inputmode="numeric" maxlength="4" value="1234" size="5"></div>
+</section>
+
+<section>
+ <h2>Right now</h2>
+ <div class="row"><span class="big" id="lvl">–</span><span class="grow"></span>
+  <label class="sw"><input type="checkbox" id="auto"> Run schedule</label></div>
+ <input type="range" id="bri" min="0" max="100" value="50" aria-label="Brightness" disabled>
+ <p class="sub" id="modeNote">Brightness applies when the schedule is off.</p>
+</section>
+
+<section>
+ <h2>Daily schedule</h2>
+ <svg id="chart" viewBox="0 0 288 84" role="img" aria-label="Brightness across 24 hours"></svg>
+ <div id="slots"></div>
+ <div class="row" style="margin-top:8px">
+  <button id="add">Add time</button><button id="reload" disabled>Reload from lamp</button>
+  <button class="main" id="push" disabled>Save to lamp</button></div>
+</section>
+
+<section>
+ <div class="row"><button id="clock" disabled>Set lamp clock to this phone</button></div>
+ <p class="sub" id="clk" style="margin-top:8px"></p><p class="sub">The lamp has no daylight saving setting. Set the clock again after clocks change.</p>
+ <details><summary>Bluetooth log</summary><pre id="log"></pre></details>
+</section>
+</main>
+
+<script>
+const $=s=>document.querySelector(s);
+const U=n=>"0000"+n+"-0000-1000-8000-00805f9b34fb";
+let dev,tx,rx,mode=0,slots=[],pend=null,gotInfo=false,chain=Promise.resolve(),st={on:false,level:0};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const hex=a=>[...a].map(b=>b.toString(16).padStart(2,"0")).join(" ");
+const log=(d,a)=>{const l=$("#log");l.textContent+=d+" "+hex(a)+"\n";l.scrollTop=l.scrollHeight};
+const status=(t,bad)=>{const s=$("#status");s.textContent=t;s.className=bad?"warn":""};
+function frame(c,s,o){const f=new Uint8Array(16);f[0]=c;f[1]=s;for(const k in(o||{}))f[k]=o[k];f[15]=c<<4;return f}
+function q(f){chain=chain.then(async()=>{if(!tx)return;log("→",f);
+ await tx.writeValueWithoutResponse(f);await sleep(20)}).catch(e=>status("Write failed: "+e.message+". Nothing was changed.",1));return chain}
+const enable=on=>{["disc","reload","clock"].forEach(i=>$("#"+i).disabled=!on);$("#bri").disabled=!on;if(!on)$("#push").disabled=true};
+
+async function connect(){
+ if(!navigator.bluetooth){status("Web Bluetooth is not available here. Open this page in Bluefy.",1);return}
+ try{
+  status("Choose your lamp in the list…");
+  const slow=setTimeout(()=>status("Still waiting for Bluefy to report your choice. "+(window.top!==window.self?"This page is running inside a frame, which Bluefy may not support.":"Try again."),1),25000);
+  dev=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[U("fff0")]});
+  clearTimeout(slow);status("Selected "+(dev.name||"device")+". Connecting…");
+  dev.addEventListener("gattserverdisconnected",()=>{tx=rx=null;enable(false);status("Disconnected.")});
+  let svc,err;
+  for(let n=1;n<=3&&!svc;n++){
+   try{status("Connecting… (try "+n+" of 3)");
+    const srv=await dev.gatt.connect();await sleep(800);
+    svc=await srv.getPrimaryService(U("fff0"));
+   }catch(e){err=e;$("#log").textContent+="! "+e.name+": "+e.message+"\n";
+    try{dev.gatt.disconnect()}catch(x){}await sleep(1200)}
+  }
+  if(!svc)throw err;
+  tx=await svc.getCharacteristic(U("fff2"));rx=await svc.getCharacteristic(U("fff1"));
+  rx.addEventListener("characteristicvaluechanged",onRx);
+  await rx.startNotifications();
+  enable(true);status("Connected to "+(dev.name||"lamp")+". Logging in…");
+  await login();
+ }catch(e){status("Could not connect ("+(e.name||"error")+"): "+e.message+". Force-quit the LumenIZE app, power-cycle the lamp, and try again.",1)}
+}
+async function login(){
+ const p=$("#pw").value;
+ if(!/^\d{4}$/.test(p)){status("The password is 4 digits.",1);return}
+ try{localStorage.setItem("pw",p)}catch(e){}
+ gotInfo=false;
+ await q(frame(5,0xF1,{3:+p[0],4:+p[1],5:+p[2],6:+p[3]}));
+ await sleep(500);await syncTime();
+ for(let i=0;i<3&&!gotInfo;i++){await q(frame(2,0x0F));await sleep(1000)}
+ if(!gotInfo)status("Connected, but the lamp did not answer. Check the password.",1);
+}
+function syncTime(){const d=new Date(),y=d.getFullYear();
+ return q(frame(1,0x0F,{2:y&255,3:y>>8,4:d.getDay(),5:d.getMonth()+1,6:d.getDate(),7:d.getHours(),8:d.getMinutes(),9:d.getSeconds()}))}
+
+function onRx(e){
+ const dv=e.target.value;let v=new Uint8Array(dv.buffer.slice(dv.byteOffset,dv.byteOffset+dv.byteLength));
+ log("←",v);
+ if(pend){v=new Uint8Array([...pend,...v]);pend=null}
+ if(v[0]==1&&v[1]==0xF0){syncTime();return}
+ if(v[0]==2&&v[1]==0xF0){
+  const first=!gotInfo;gotInfo=true;st={on:v[2]!=0,level:v[3]};
+  $("#auto").checked=st.on;$("#bri").value=st.level;$("#lvl").textContent=st.level+"%";
+  status("Connected to "+(dev.name||"lamp")+".");
+  $("#clk").textContent="Lamp clock: "+v[5]+"/"+v[6]+" "+pad(v[7])+":"+pad(v[8]);
+  if(first){window.gs=0;setTimeout(()=>{if(!window.gs&&tx)status("The lamp did not send its schedule. On Windows this usually means the Bluetooth packet size is too small. Brightness and on/off still work.",1)},5000)}
+  if(first||v[4]!=mode){mode=v[4];q(frame(3,0x0F,{2:mode}))}
+ }
+ if(v[0]==3&&v[1]==0xF0){
+  if(v.length<4+3*v[3]){pend=v;return}
+  mode=v[2];slots=[];
+  for(let i=0;i<v[3];i++){const p=4+i*3;if(!(v[p]&0x80))break;slots.push({h:v[p]&0x7f,m:v[p+1],l:Math.min(100,v[p+2])})}
+  window.gs=1;$("#push").disabled=false;drawSlots();
+ }
+}
+const setState=()=>q(frame(2,0xF1,{2:$("#auto").checked?1:0,3:+$("#bri").value,4:mode}));
+function pushSchedule(){
+ const s=sorted().slice(0,48),f=new Uint8Array(152);
+ f[0]=3;f[1]=0xF1;f[2]=mode;f[3]=s.length;
+ s.forEach((x,i)=>{f[4+i*3]=x.h|0x80;f[5+i*3]=x.m;f[6+i*3]=x.l});
+ f[148]=0x0F;f[151]=0x30;
+ q(f).then(()=>status("Schedule sent. Reload to confirm what the lamp stored."));
+}
+const sorted=()=>[...slots].sort((a,b)=>a.h*60+a.m-(b.h*60+b.m));
+const pad=n=>String(n).padStart(2,"0");
+
+function drawSlots(){
+ slots=sorted();const box=$("#slots");box.innerHTML="";
+ if(!slots.length)box.innerHTML='<p class="sub">No times yet. Add one to start a schedule.</p>';
+ slots.forEach((s,i)=>{
+  const r=document.createElement("div");r.className="slot";
+  r.innerHTML='<input type="time" value="'+pad(s.h)+":"+pad(s.m)+'" aria-label="Time"><input class="grow" type="range" min="0" max="100" value="'+s.l+'" aria-label="Brightness"><output>'+s.l+'%</output><button aria-label="Remove time">✕</button>';
+  const [t,g,o,b]=r.children;
+  t.onchange=()=>{const[h,m]=t.value.split(":").map(Number);if(!isNaN(h)){s.h=h;s.m=m;drawSlots()}};
+  g.oninput=()=>{s.l=+g.value;o.textContent=s.l+"%";chart()};
+  b.onclick=()=>{slots.splice(i,1);drawSlots()};
+  box.appendChild(r);
+ });
+ chart();
+}
+function chart(){
+ const c=$("#chart"),s=sorted(),X=m=>m/1440*288,Y=l=>76-l*0.68;
+ let pts=s.map(x=>[X(x.h*60+x.m),Y(x.l)]);
+ let d="";
+ if(pts.length){const f=pts[0],l=pts[pts.length-1];d="M0,"+l[1]+" L"+pts.map(p=>p.join(",")).join(" L")+" L288,"+l[1]}
+ let g="";for(let h=0;h<=24;h+=6)g+='<line x1="'+X(h*60)+'" x2="'+X(h*60)+'" y1="4" y2="76" stroke="var(--line)"/><text x="'+Math.min(X(h*60)+2,262)+'" y="83" font-size="8" fill="var(--mute)">'+pad(h%24)+":00</text>";
+ c.innerHTML=g+(d?'<path d="'+d+'" fill="none" stroke="var(--sun)" stroke-width="2.5" stroke-linejoin="round"/>':"")+pts.map(p=>'<circle cx="'+p[0]+'" cy="'+p[1]+'" r="3.5" fill="var(--sun)"/>').join("");
+}
+$("#conn").onclick=connect;
+$("#disc").onclick=()=>dev&&dev.gatt.disconnect();
+$("#clock").onclick=()=>syncTime().then(()=>status("Lamp clock set."));
+$("#reload").onclick=()=>q(frame(3,0x0F,{2:mode}));
+$("#push").onclick=pushSchedule;
+$("#add").onclick=()=>{if(slots.length<48){slots.push({h:12,m:0,l:100});drawSlots()}};
+$("#auto").onchange=setState;
+$("#bri").oninput=()=>$("#lvl").textContent=$("#bri").value+"%";
+$("#bri").onchange=setState;
+try{$("#pw").value=localStorage.getItem("pw")||"1234"}catch(e){}
+addEventListener("error",e=>status("Page error: "+e.message,1));
+addEventListener("unhandledrejection",e=>status("Error: "+(e.reason&&e.reason.message||e.reason),1));
+if(window.top!==window.self)$(".sub").textContent+=" (Running inside a frame.)";
+drawSlots();
+</script>
+</body>
+</html>
