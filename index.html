@@ -56,6 +56,8 @@ details pre{max-height:220px;overflow:auto;font-size:.75rem;background:var(--bg)
 
 <section>
  <h2>Daily schedule</h2>
+ <div class="row"><label for="mode">Mode</label><select id="mode" disabled style="font:inherit;padding:8px;min-height:44px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)"><option value="0">Light Cycle 1</option><option value="1">Light Cycle 2</option><option value="2">Custom Mode 1</option><option value="3">Custom Mode 2</option><option value="4">Custom Mode 3</option><option value="5">Custom Mode 4</option><option value="6">Custom Mode 5</option></select></div>
+ <p class="sub">Light Cycles are built into the lamp and cannot be edited. Pick a Custom Mode to use your own times.</p>
  <svg id="chart" viewBox="0 0 288 84" role="img" aria-label="Brightness across 24 hours"></svg>
  <div id="slots"></div>
  <div class="row" style="margin-top:8px">
@@ -81,7 +83,7 @@ const status=(t,bad)=>{const s=$("#status");s.textContent=t;s.className=bad?"war
 function frame(c,s,o){const f=new Uint8Array(16);f[0]=c;f[1]=s;for(const k in(o||{}))f[k]=o[k];f[15]=c<<4;return f}
 function q(f){chain=chain.then(async()=>{if(!tx)return;log("→",f);
  await tx.writeValueWithoutResponse(f);await sleep(20)}).catch(e=>status("Write failed: "+e.message+". Nothing was changed.",1));return chain}
-const enable=on=>{["disc","reload","clock"].forEach(i=>$("#"+i).disabled=!on);$("#bri").disabled=!on;if(!on)$("#push").disabled=true};
+const enable=on=>{["disc","reload","clock","mode"].forEach(i=>$("#"+i).disabled=!on);$("#bri").disabled=!on;if(!on)$("#push").disabled=true};
 
 async function connect(){
  if(!navigator.bluetooth){status("Web Bluetooth is not available here. Open this page in Bluefy.",1);return}
@@ -113,8 +115,9 @@ async function login(){
  try{localStorage.setItem("pw",p)}catch(e){}
  gotInfo=false;
  await q(frame(5,0xF1,{3:+p[0],4:+p[1],5:+p[2],6:+p[3]}));
- await sleep(500);await syncTime();
+ await sleep(500);
  for(let i=0;i<3&&!gotInfo;i++){await q(frame(2,0x0F));await sleep(1000)}
+ await syncTime();
  if(!gotInfo)status("Connected, but the lamp did not answer. Check the password.",1);
 }
 function syncTime(){const d=new Date(),y=d.getFullYear();
@@ -129,7 +132,7 @@ function onRx(e){
   const first=!gotInfo;gotInfo=true;st={on:v[2]!=0,level:v[3]};
   $("#auto").checked=st.on;$("#bri").value=st.level;$("#lvl").textContent=st.level+"%";
   status("Connected to "+(dev.name||"lamp")+".");
-  $("#clk").textContent="Lamp clock: "+v[5]+"/"+v[6]+" "+pad(v[7])+":"+pad(v[8]);
+  $("#clk").textContent=(first?"Lamp clock when you connected (before syncing): ":"Lamp clock: ")+v[5]+"/"+v[6]+" "+pad(v[7])+":"+pad(v[8]);$("#mode").value=v[4];
   if(first){window.gs=0;setTimeout(()=>{if(!window.gs&&tx)status("The lamp did not send its schedule. On Windows this usually means the Bluetooth packet size is too small. Brightness and on/off still work.",1)},5000)}
   if(first||v[4]!=mode){mode=v[4];q(frame(3,0x0F,{2:mode}))}
  }
@@ -137,10 +140,10 @@ function onRx(e){
   if(v.length<4+3*v[3]){pend=v;return}
   mode=v[2];slots=[];
   for(let i=0;i<v[3];i++){const p=4+i*3;if(!(v[p]&0x80))break;slots.push({h:v[p]&0x7f,m:v[p+1],l:Math.min(100,v[p+2])})}
-  window.gs=1;$("#push").disabled=false;drawSlots();
+  window.gs=1;$("#push").disabled=mode<2;$("#add").disabled=mode<2;if(mode<2)status("This is a built-in Light Cycle and cannot be edited. Pick a Custom Mode to use your own times.");drawSlots();
  }
 }
-const setState=()=>q(frame(2,0xF1,{2:$("#auto").checked?1:0,3:+$("#bri").value,4:mode}));
+const setState=async()=>{if($("#auto").checked)await syncTime();return q(frame(2,0xF1,{2:$("#auto").checked?1:0,3:+$("#bri").value,4:mode}))};
 function pushSchedule(){
  const s=sorted().slice(0,48),f=new Uint8Array(152);
  f[0]=3;f[1]=0xF1;f[2]=mode;f[3]=s.length;
@@ -179,6 +182,7 @@ $("#clock").onclick=()=>syncTime().then(()=>status("Lamp clock set."));
 $("#reload").onclick=()=>q(frame(3,0x0F,{2:mode}));
 $("#push").onclick=pushSchedule;
 $("#add").onclick=()=>{if(slots.length<48){slots.push({h:12,m:0,l:100});drawSlots()}};
+$("#mode").onchange=async()=>{const m=+$("#mode").value;mode=m;await syncTime();await q(frame(2,0xF1,{2:1,3:+$("#bri").value,4:m}));await sleep(300);await q(frame(2,0x0F));await q(frame(3,0x0F,{2:m}))};
 $("#auto").onchange=setState;
 $("#bri").oninput=()=>$("#lvl").textContent=$("#bri").value+"%";
 $("#bri").onchange=setState;
